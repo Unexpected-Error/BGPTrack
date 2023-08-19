@@ -1,0 +1,23 @@
+[package]
+name = "BGP_detect"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.74"
+bgpkit-broker = "0.7.0-alpha.3"
+bgpkit-parser = "0.9.4"
+clap = { version = "4.3.21", features = ["derive"] }
+env_logger = "0.10.0"
+epoch-converter = "0.1.3"
+ipnet = "2.8.0"
+ipnetwork = "0.20.0"
+log = "0.4.20"
+patricia_tree = "0.6.2"
+serde = "1.0.183"
+sqlx = {version = "0.7.1", features = [ "postgres", "ipnetwork", "runtime-tokio", "tls-rustls" ] }
+# surrealdb = { version =  "1.0.0-beta.9", features = [] }
+tokio = { version = "1.32.0", features = ["full"] }
+#time = { version = "0.3.25", features = ["macros", "formatting"] }
