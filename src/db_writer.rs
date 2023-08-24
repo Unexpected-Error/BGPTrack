@@ -1,31 +1,26 @@
 pub(crate) mod types {
+    use std::ops::{Deref, DerefMut};
     // Error Handling
-    use std::error::Error;
+    use anyhow::{anyhow, Result};
     // Import Special Types
     use ipnetwork::IpNetwork;
     use rayon::prelude::*;
     // Serde Derives
     use serde::{Deserialize, Serialize};
+    use sqlx::postgres::{PgHasArrayType, PgTypeInfo};
+
     #[allow(non_camel_case_types)]
     pub type R_ASN = u32;
-
-    #[derive(Debug, Serialize, Deserialize, Clone)]
-    pub struct Orange {
-        // check all places orange is used
-        pub(crate) asn: i64,
-        pub(crate) announcements: Vec<Announcement>,
-    }
 
     pub struct RawAnnouncement {
         pub(crate) time: f64,
         pub(crate) announcing: bool,
         pub(crate) prefix: IpNetwork,
-        pub(crate) as_path: Option<Vec<u32>>,
-        pub(crate) as_path_is_seq: bool,
+        pub(crate) as_path_segments: Option<Vec<ASPathSeg>>,
     }
 
     impl RawAnnouncement {
-        pub fn to_announcement_as_new(self) -> Result<Announcement, Box<dyn Error>> {
+        pub fn to_announcement_as_new(self) -> Result<Announcement> {
             Ok(Announcement {
                 start_time: match self.announcing {
                     true => Some(self.time),
@@ -36,56 +31,101 @@ pub(crate) mod types {
                     true => None,
                 },
                 prefix: self.prefix,
-                as_path: match self.announcing {
-                    false => self
-                        .as_path
-                        .ok_or("NO AS-PATH WHEN ANNOUNCING")?
-                        .par_iter()
-                        .map(|&a| a as i64)
-                        .collect(),
-                    true => match self.as_path {
+                as_path_segments: segar::from(match self.announcing {
+                    true => self
+                        .as_path_segments
+                        .ok_or(anyhow!("NO AS-PATH WHEN ANNOUNCING"))?,
+                    false => match self.as_path_segments {
                         None => {
                             vec![]
                         }
-                        Some(n) => n.par_iter().map(|&a| a as i64).collect(),
+                        Some(n) => n,
                     },
-                },
-                as_path_is_seq: self.as_path_is_seq,
+                }),
             })
         }
     }
 
-    #[derive(sqlx::Type, Debug, Serialize, Deserialize, Clone)]
+    #[derive(sqlx::FromRow, Debug, Serialize, Deserialize, Clone)]
+    pub struct Orange {
+        // check all places orange is used
+        pub(crate) asn: i64,
+        pub(crate) announcements: Vec<Announcement>,
+    }
+    #[derive(sqlx::Type, sqlx::FromRow, Debug, Serialize, Deserialize, Clone)]
     #[sqlx(type_name = "announcement")]
     pub struct Announcement {
         pub(crate) start_time: Option<f64>,
         pub(crate) stop_time: Option<f64>,
         pub(crate) prefix: IpNetwork,
+        pub(crate) as_path_segments: segar,
+    }
+    #[derive(sqlx::Type, Debug, Serialize, Deserialize, Clone)]
+    #[sqlx(type_name = "as_path_segment")]
+    pub struct ASPathSeg {
+        pub(crate) seq: bool,
+        pub(crate) confed: bool,
         pub(crate) as_path: Vec<i64>,
-        pub(crate) as_path_is_seq: bool,
+    }
+
+    impl PgHasArrayType for ASPathSeg {
+        fn array_type_info() -> PgTypeInfo {
+            PgTypeInfo::with_name("_as_path_segment")
+        }
+    }
+
+    #[derive(sqlx::Type, Debug, Serialize, Deserialize, Clone)]
+    #[sqlx(type_name = "as_path_w")]
+    pub struct segar {
+        a_p: Vec<ASPathSeg>,
+    }
+
+    impl PgHasArrayType for segar {
+        fn array_type_info() -> PgTypeInfo {
+            PgTypeInfo::with_name("_as_path_seg_w")
+        }
+    }
+
+    impl Deref for segar {
+        type Target = Vec<ASPathSeg>;
+
+        fn deref(&self) -> &Self::Target {
+            &self.a_p
+        }
+    }
+
+    impl DerefMut for segar {
+        fn deref_mut(self: &mut segar) -> &mut Vec<ASPathSeg> {
+            &mut self.a_p
+        }
+    }
+
+    impl From<Vec<ASPathSeg>> for segar {
+        fn from(value: Vec<ASPathSeg>) -> Self {
+            Self { a_p: value }
+        }
     }
 }
 
-use crate::db_writer::types::{Announcement, RawAnnouncement, R_ASN};
+use crate::db_writer::types::{ASPathSeg, Announcement, RawAnnouncement, R_ASN};
 use anyhow::Context;
 use log::{info, warn};
 // use rayon::prelude::*;
 // use sqlx::{Row};
+use ipnetwork::IpNetwork;
 use std::error::Error;
 use std::net::IpAddr;
-use ipnetwork::IpNetwork;
 use types::Orange;
 
 const PG_URL: &str = "postgres://postgres:postgrespw@localhost:55000/BGP";
-const INSERT: &str = "INSERT INTO Orange (id, prefixes) VALUES ($1, $2)";
+const INSERT: &str = "INSERT INTO Orange (asn, announcements) VALUES ($1, $2)";
 const DELETE_ALL: &str = "TRUNCATE Orange";
 
-const OLD_IP_CHECK: &str = "SELECT id, prefixes FROM orange WHERE EXISTS (SELECT 1 FROM unnest(prefixes) AS p WHERE $1 << p)";
+// const OLD_IP_CHECK: &str = "SELECT asn, prefixes FROM orange WHERE EXISTS (SELECT 1 FROM unnest(prefixes) AS p WHERE $1 << p)";
 const IP_CHECK: &str =
-    "SELECT * FROM Orange WHERE EXISTS ( SELECT 1 FROM unnest(prefix) AS p WHERE (p.prefixes >> $1)
-);";
+    "SELECT * FROM Orange WHERE EXISTS ( SELECT 1 FROM unnest(announcements) AS a WHERE (a.prefix >> $1));";
 
-pub(crate) async fn open_db() -> Result<sqlx::PgPool, Box<dyn Error>> {
+pub(crate) async fn open_db() -> Result<sqlx::PgPool, anyhow::Error> {
     // TODO: Add user/password args and pull from .env
     info!("Spinning up db conn...");
     let pool = sqlx::postgres::PgPool::connect(PG_URL)
@@ -104,40 +144,48 @@ async fn insert_new_ann(
     ann: Announcement,
     ASN: i64,
     pool: &sqlx::PgPool,
-) -> Result<(), Box<dyn Error>> {
-    
+) -> Result<(), anyhow::Error> {
     sqlx::query!(
-        "UPDATE Orange SET announcements = array_append(announcements, $1) WHERE asn = $2",
-        ann as _,
-        ASN
+        "UPDATE Orange SET announcements = array_append(announcements, $2) WHERE asn = $1",
+        //try announcements ann as () to use _ as _ on inner
+        //        ann as _,
+        ASN,
+        ann as _
     )
     .execute(pool)
-    .await?;
+    .await
+    .context("here")?;
     Ok(())
 }
 
 pub(crate) async fn insert(
     ann: (RawAnnouncement, R_ASN),
     pool: &sqlx::PgPool,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), anyhow::Error> {
     let ASN = ann.1 as i64;
     let ann = ann.0;
 
     match ann.announcing {
         true => {
-            info!("Inserting new announcement, prefix: {}, peer ASN: {}", ann.prefix, ASN);
+            info!(
+                "Inserting new announcement, prefix: {}, peer ASN: {}",
+                ann.prefix, ASN
+            );
             insert_new_ann(ann.to_announcement_as_new()?, ASN, pool).await?;
         }
         false => {
-            info!("Looking for prev ann to withdraw... prefix: {}, peer ASN: {}", ann.prefix, ASN);
+            info!(
+                "Looking for prev ann to withdraw... prefix: {}, peer ASN: {}",
+                ann.prefix, ASN
+            );
 
             let latest_start_ann: Option<Announcement> = sqlx::query_as!( 
                 Announcement,
                 r#"
-                SELECT a.start_time, a.stop_time, a.prefix as "prefix!: IpNetwork", a.as_path as "as_path!: Vec<i64>", a.as_path_is_seq as "as_path_is_seq!: bool"
+                SELECT a.start_time, a.stop_time, a.prefix as "prefix!: IpNetwork", a.as_path_segments as "as_path_segments!: Vec<ASPathSeg>"
                 FROM Orange AS o
                 CROSS JOIN LATERAL (
-                    SELECT a.start_time, a.stop_time, a.prefix, a.as_path, a.as_path_is_seq
+                    SELECT a.start_time, a.stop_time, a.prefix, a.as_path_segments
                     FROM unnest(o.announcements) AS a
                     WHERE o.asn = $1 AND a.prefix = $2
                     ORDER BY a.start_time DESC
@@ -147,9 +195,9 @@ pub(crate) async fn insert(
                 ASN,
                 ann.prefix
             )
-            .fetch_optional(pool)
-            .await?;
-            
+                .fetch_optional(pool)
+                .await?;
+
             if let Some(start_ann) = latest_start_ann {
                 info!("\tFOUND, updating stop time for {:?}", start_ann);
                 // An existing announcement with a matching prefix was found, update stop_time
@@ -209,6 +257,7 @@ pub(crate) async fn search(ip: IpAddr, pool: &sqlx::PgPool) -> Result<Option<Ora
     //     }
     // }
 }
+
 pub(crate) async fn getall(ip: IpAddr, pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
     type tbl = Vec<Orange>;
     let latest_start_ann = sqlx::query_as!(
@@ -231,6 +280,7 @@ pub(crate) async fn getall(ip: IpAddr, pool: &sqlx::PgPool) -> Result<(), sqlx::
     .await?;
     Ok(())
 }
+
 pub(crate) async fn getasll(ip: IpAddr, pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
     type tbl = Vec<Orange>;
     let latest_start_ann = sqlx::query_as!(
