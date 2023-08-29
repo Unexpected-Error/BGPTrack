@@ -21,3 +21,6 @@ sqlx = {version = "0.7.1", features = [ "postgres", "ipnetwork", "macros", "runt
 tokio = { version = "1.32.0", features = ["full"] }
 time = { version = "0.3.25", features = ["macros", "formatting"] }
 rayon = "1.7.0"
+uuid = { version = "1.4.1", features = ["v4", "fast-rng", "macro-diagnostics"] }
+async-ringbuf = { version = "0.1.3", features = ["impl-tokio"] }
+#ringbuf = "0.3.3"
