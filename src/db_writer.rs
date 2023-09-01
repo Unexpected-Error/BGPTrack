@@ -1,13 +1,15 @@
 pub(crate) mod types {
+    use std::{fmt, ops};
+    use std::fmt::Formatter;
     // Error Handling
-    use anyhow::{anyhow, Result};
+    
     // Import Special Types
     use ipnetwork::IpNetwork;
     // Serde Derives
     use serde::{Deserialize, Serialize};
     use sqlx::postgres::{PgHasArrayType, PgTypeInfo};
-    use tokio::io::AsyncRead;
-
+    use tokio::fs::write;
+    pub static DELIMITER: &str = ",";
     #[derive(sqlx::FromRow, Debug, Clone)]
     pub struct Announcement {
         pub(crate) id: uuid::Uuid,
@@ -17,16 +19,24 @@ pub(crate) mod types {
         pub(crate) prefix: IpNetwork,
         pub(crate) as_path_segments: Vec<ASPathSeg>,
     }
-    // impl dyn AsyncRead {
-    //     
-    // }
-    
+    //r#"1cc8b0cf-fa07-40e3-ba47-6c71522c3fdd,65000,f,0,1.0.0.0/8,"{   (f\,t\,\""\{1\,2324\,42\}\""),  (f\,t\,\""\{1\,24\,42\}\"")}""#.to_string();
+    impl ops::Deref for AP_Segments {
+        type Target = Vec<ASPathSeg>;
 
-    // impl PgHasArrayType for Announcement {
-    //     fn array_type_info() -> PgTypeInfo {
-    //         PgTypeInfo::with_name("_announcement")
-    //     }
-    // }
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+    pub struct AP_Segments(pub Vec<ASPathSeg>);
+    impl fmt::Display for AP_Segments {
+        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            write!(f, "\"{{{}}}\"", self.iter().map(|x| format!("{}", x)).collect::<Vec<String>>().join(DELIMITER))
+            // let initial = write!(f, "{{");
+            // self.0.iter().fold(initial, |result, apseg| {
+            //     result.and_then(|_| write!(f, "({}),", apseg))
+            // }).and_then(|_| write!(f, "}}"))
+        }
+    }
 
     #[derive(sqlx::Type, Debug, Serialize, Deserialize, Clone)]
     #[sqlx(type_name = "as_path_segment")]
@@ -41,7 +51,13 @@ pub(crate) mod types {
             PgTypeInfo::with_name("_as_path_segment")
         }
     }
-
+    impl fmt::Display for ASPathSeg {
+        fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+            let tmp = self.as_path.iter().map(|x|{x.to_string()}).collect::<Vec<String>>().join(&*("\\".to_string() + DELIMITER));
+            write!(f, "({}\\{DELIMITER}{}\\{DELIMITER}\\\"\"\\{{{}\\}}\\\"\")", self.seq, self.confed, tmp)
+        }
+    }
+    
     // #[derive(sqlx::Type, Debug, Serialize, Deserialize, Clone)]
     // #[sqlx(type_name = "as_path_w")]
     // pub struct segar {
@@ -83,20 +99,24 @@ pub(crate) mod types {
 //Insert  --> Autopick between C and U
 
 // types
-use ipnetwork::IpNetwork;
-use std::net::IpAddr;
-use types::{ASPathSeg, Announcement};
+
+
 // errors && logs
-use anyhow::{anyhow, Context};
+use anyhow::{Context};
+#[cfg(debug_assertions)]
 use log::{info, warn};
+
 const PG_URL: &str = "postgres://postgres:postgrespw@localhost:55000/BGP";
+
 pub(crate) async fn open_db() -> Result<sqlx::PgPool, anyhow::Error> {
     // TODO: Add user/password args and pull from .env
-    info!("Spinning up db conn...");
+    #[cfg(debug_assertions)]
+    { info!("Spinning up db conn..."); }
     let pool = sqlx::postgres::PgPool::connect(PG_URL)
         .await
         .context("While connecting to pg db")?;
-    warn!("Migrating db...");
+    #[cfg(debug_assertions)]
+    { warn!("Migrating db..."); }
     sqlx::migrate!("./migrations")
         .run(&pool)
         .await
@@ -123,8 +143,10 @@ pub(crate) async fn open_db() -> Result<sqlx::PgPool, anyhow::Error> {
 /// delete_all(&pool).await? // Bye bye data
 /// `
 pub(crate) async fn delete_all(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
-    warn!("Truncating Announcement Table");
-    sqlx::query("TRUNCATE Announcement").execute(pool).await?;
+    #[cfg(debug_assertions)]
+    {
+        warn!("Truncating Announcement Table");
+    }    sqlx::query("TRUNCATE Announcement").execute(pool).await?;
     Ok(())
 }
 

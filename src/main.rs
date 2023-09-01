@@ -1,71 +1,80 @@
-
-
+use std::net::IpAddr;
 // Logs and Errors
-use anyhow::{Context, Result};
-use async_ringbuf::{AsyncHeapRb};
+use anyhow::{anyhow, Context, Result};
+
 #[allow(unused_imports)]
+#[cfg(debug_assertions)]
 use log::{info, warn};
 
 // DB
-#[allow(unused_imports)]
-use sqlx::{Connection, Row};
-use tokio::io::{AsyncRead, AsyncReadExt, BufReader, ReadBuf};
-use uuid::Uuid;
-mod db_writer;
+use sqlx::Row;
 
-use db_writer::{open_db};
-use crate::bgp::{collect_bgp, parse_bgp};
-use crate::db_writer::delete_all;
-use tokio::time::{sleep, Duration};
-use crossbeam_channel::{unbounded}; 
-// BGP
 mod bgp;
+use bgp::{collect_bgp, parse_bgp};
+mod db_writer;
+use db_writer::{delete_all, open_db};
 
-// use crate::db_writer::{insert_announcement};
-// use bgp::{collect_bgp, parse_bgp};
-
-
-// let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+use crate::db_writer::types::{AP_Segments, ASPathSeg, Announcement, DELIMITER};
+use crossbeam_channel::unbounded;
+use ipnetwork::IpNetwork;
+use tokio::io::{stdin, AsyncBufReadExt, AsyncRead, AsyncReadExt};
+use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    console_subscriber::init();
-    env_logger::init();
+    #[cfg(debug_assertions)]
+    {
+        console_subscriber::init();
+        env_logger::init();
+    }
+
     let pool = open_db().await?;
     delete_all(&pool).await?;
-    // sleep(Duration::from_millis(2000)).await;
+
     let mut conn = pool.acquire().await?;
-    let mut cpin = conn.copy_in_raw("COPY Announcement FROM STDIN").await?;
-    let (sender, receiver) = unbounded();
-    
-    
-    
-    tokio::task::spawn_blocking(move || {
-        parse_bgp(collect_bgp(1692223200, 1692223953), sender)
+
+    let (sender, receiver) = unbounded::<Vec<u8>>();
+
+    let handle1 = tokio::task::spawn_blocking(move || {
+        parse_bgp(collect_bgp(1692223577, 1692223953), sender)?;
+        anyhow::Ok(())
         // 15 min of data 1692223200 1692223953
-    })
-    .await
-    .with_context(|| "Collecting BGP data panicked")??;
-    
-    {
-        use std::time::Instant;
-        for data in receiver.iter() {
-            let now = Instant::now();
-            cpin.send(data).await?;
-            let elapsed = now.elapsed();
-            println!("Elapsed: {:.2?}", elapsed);
+        // 1 day 1692309600
+    });
+    let handle2 = tokio::task::spawn(async move {
+        let mut cpin = conn
+            .copy_in_raw(&*format!(
+                "COPY Announcement FROM STDIN (DELIMITER '{DELIMITER}', FORMAT csv)"
+            ))
+            .await?;
+        #[cfg(debug_assertions)]
+        {
+            use std::time::Instant;
+            for data in receiver.iter() {
+                let now = Instant::now();
+                cpin.send(data).await?;
+                let elapsed = now.elapsed();
+                println!("Elapsed: {:.2?}", elapsed);
+            }
+            cpin.finish().await?;
         }
-        cpin.finish().await?;
-    }
+        #[cfg(not(debug_assertions))]
+        {
+            for data in receiver.iter() {
+                cpin.send(data).await?;
+            }
+            cpin.finish().await?;
+        }
+        anyhow::Ok(())
+    });
+    handle1
+        .await
+        .with_context(|| "Parsing BGP data panicked")??;
+    handle2
+        .await
+        .with_context(|| "Saving BGP data panicked")??;
     Ok(())
 }
-// let mut map = StringPatriciaMap::new();
-// map.insert("1100", "ASN6500");
-// map.insert("1110", "ASN6501");
-// 　22 days to download 3 days of data and 3 days to reasearch methods
-// TODO: Add parralelled insert using pool
-// 20MB network   | 190 MB disk || 15 minutes data | 290 minutes processing time 
-// 175 GB network | 1.7 TB      || 3 months data   | 4.8 years processing time 
-// TODO: Collect timing and size stats
-// TODO: Use docker to automate
+// 15 minutes of data | 287 MB on disk | 42 sec || 0.04666666667 time ratio
 
+// 1 day | 28GB | ~ 1 hour

@@ -266,10 +266,11 @@ struct Record {
     #[allow(dead_code)]
     id: Thing,
 }
+
 #[derive(Debug, Serialize, Deserialize)]
 struct User {
     id: String,
-    balance: String
+    balance: String,
 }
 
 #[tokio::main]
@@ -291,14 +292,12 @@ async fn main() -> surrealdb::Result<()> {
         )
         .await?;
     // dbg!(created);
-    
+
     let mut res = db.query("Select * From Users;").query("SELECT * FROM Users WHERE balance = '0'").await?;
     let all: Vec<Record> = res.take(0)?;
-    for n in all {
-        
-    }
+    for n in all {}
     dbg!(all);
-    
+
     let idk = db.query("Delete Users Return before").await?;
     // dbg!(idk);
     Ok(())
