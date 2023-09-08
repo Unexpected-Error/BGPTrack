@@ -1,5 +1,5 @@
 [package]
-name = "BGPTrack"
+name = "bgp_track"
 version = "0.1.0"
 edition = "2021"
 
@@ -28,6 +28,12 @@ lazy_static = "1.4.0"
 dotenvy = "0.15.7"
 fern = { version = "0.6.2", features = ["colored"] }
 humantime = "2.1.0"
+atty = "0.2.14"
+#slint = "1.2.0"
 
 [package.metadata.cargo-udeps.ignore]
 normal = ["console-subscriber"]
+
+
+#[build-dependencies]
+#slint-build = "1.2.0"

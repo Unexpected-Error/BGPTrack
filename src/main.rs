@@ -2,58 +2,123 @@
 use anyhow::{Context, Result};
 use fern::colors::{Color, ColoredLevelConfig};
 #[allow(unused_imports)]
-use log::{info, warn, debug, error};
+use log::{debug, error, info, warn};
 
 // bgp parsing
 mod bgp;
-use bgp::{collect_bgp, parse_bgp};
 use crate::bgp::{EOF, EOW};
+use bgp::{collect_bgp, parse_bgp};
 
 // db
 mod db_writer;
-use db_writer::{delete_all, open_db,find_short_lived, Processor, types::DELIMITER};
+use db_writer::{delete_all, find_short_lived, open_db, types::DELIMITER, Processor};
 use sqlx::{Connection, PgPool};
 
 // bag of tools
-use crossbeam_channel::bounded;
+use crate::db_writer::ip_search;
 use clap::{Parser, Subcommand};
+use crossbeam_channel::bounded;
+use itertools::{Itertools, MinMaxResult};
 
 #[derive(Subcommand)]
 enum Job {
+    #[command(about="WIPES DATABSE, then repopulates")]
     ReloadData,
-    FindShortlived
+    #[command(about="Collects all short lived announcements (<15 minutes)")]
+    FindShortlived {
+        #[arg(short, long, value_parser = clap::value_parser!(i64).range(0..), help="How many rows to return. Leave blank for all")]
+        limit: Option<i64>,
+
+        #[command(subcommand)]
+        format: Processor,
+    },
+    #[command(about="Collects all announcements for a prefix")]
+    SearchIP {
+        ip: String,
+    },
 }
 
-
 #[derive(Parser)]
-#[command(author, version, about, long_about = None)]
+#[command(name = "BGPTrack")]
+#[command(author = "Adam T.")]
+#[command(version)]
+#[command(about = "BGP hijack detection tool", long_about = None)]
 struct Args {
     #[command(subcommand)]
     command: Job,
+    #[arg(short, long)]
+    verbose: bool,
 }
-
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // console_subscriber::init(); // use with tokio-console 
-    set_up_logging()?;
+    // console_subscriber::init(); // use with tokio-console
+    // if atty::is(atty::Stream::Stdout) {
+    //     println!("I'm a terminal");
+    // } else {
+    //     println!("I'm not");
+    // }
     let args = Args::parse();
-    
-
+    set_up_logging(if !args.verbose {
+        log::LevelFilter::Info
+    } else {
+        log::LevelFilter::Debug
+    })?;
     let pool = open_db().await?;
 
-    let data = find_short_lived(900, 1692223200, 1692226800, 10,Processor::OverallTimeRange, &pool).await?;
-    info!("data");
-    for datapoint in data {
-        info!("{datapoint:?}");
+    match args.command {
+        Job::ReloadData => {
+            reload_data(pool).await?;
+        }
+        Job::FindShortlived { format, limit } => {
+            if limit.is_none() {warn!("Searching without any limits, may take a really long time")}
+            else {warn!("Long running query starting...");}
+            let data = find_short_lived(900, 1692223200, 1692226800, limit, format, &pool).await?;
+            // start can be 0, and stop `std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() + 60` 
+            // for when start/stop are implemented arguments to the program
+            if data.len() < 750
+            // lets not blow up the computer...
+            {
+                data.iter()
+                    .sorted_unstable_by_key(|point| (point.3, point.0, point.1, point.2))
+                    .for_each(|datapoint| {
+                        info!(
+                            "ip: {},\tfirst seen: {} {},\tlast seen: {} {},\tASN: {}",
+                            datapoint.0,
+                            datapoint.1.date(),
+                            datapoint.1.time(),
+                            datapoint.2.date(),
+                            datapoint.2.time(),
+                            datapoint.3
+                        );
+                    });
+            }
+            info!("Dataset length = {}", data.len());
+        }
+        Job::SearchIP { ip } => {
+            match ip_search(ip.parse()?, &pool).await {
+                Ok(n) => {
+                    match n.iter().minmax_by_key(|k| {k.timestamp}) { //a.timestamp.partial_cmp(&b.timestamp).unwrap()
+
+                        MinMaxResult::NoElements => {info!("Sorry, no announcements found for {ip}")}
+                        MinMaxResult::OneElement(data) => {info!("Got data:\n{data:#?}")}
+                        MinMaxResult::MinMax(min, max) => {info!("Got data:\n{max:#?}\n{min:#?}")}
+                    };
+                    
+                }
+                Err(n) => {
+                    error!("Something went wrong: {n}");
+                }
+            };
+        }
     }
-    //reload_data(pool).await?;
+
     Ok(())
 }
 
 async fn reload_data(pool: PgPool) -> Result<()> {
     delete_all(&pool).await?;
-    
+
     let mut conn = pool.acquire().await?;
 
     let (sender, receiver) = bounded::<Vec<u8>>(0);
@@ -126,14 +191,14 @@ async fn reload_data(pool: PgPool) -> Result<()> {
 // 1 day | 28GB | ~ 1 hour
 
 /// what it says on the tin. Call asap on main
-fn set_up_logging() -> Result<()>{
+fn set_up_logging(logging_level: log::LevelFilter) -> Result<()> {
     let colors_line = ColoredLevelConfig::new()
         .error(Color::Red)
         .warn(Color::BrightYellow)
         .info(Color::White)
         .debug(Color::White)
         .trace(Color::BrightBlack);
-    
+
     let colors_level = colors_line.info(Color::Green);
     fern::Dispatch::new()
         .format(move |out, message, record| {
@@ -149,12 +214,13 @@ fn set_up_logging() -> Result<()>{
                 message = message,
             ));
         })
-        .level(log::LevelFilter::Debug)
+        .chain(fern::log_file("output.log")?)
+        .level(logging_level)
         .level_for("sqlx", log::LevelFilter::Error)
         .chain(std::io::stdout())
         .apply()?;
 
     debug!("finished setting up logging!");
-    
+
     Ok(())
 }

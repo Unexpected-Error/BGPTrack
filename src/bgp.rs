@@ -1,9 +1,5 @@
-#![feature(int_roundings)]
 // Logs and Errors
-#[allow(unused_imports)]
-use anyhow::Context;
-#[allow(unused_imports)]
-use log::{info, warn, error, debug};
+use log::{info, error};
 
 // BGP data
 use uuid::Uuid;
@@ -17,9 +13,8 @@ use bgpkit_parser::{
 
 // Data Processing
 use crossbeam_channel::{Sender};
-use itertools::Itertools;
 use rayon::prelude::*;
-const CHNKSZ: usize = 12;
+const CHUNK_SIZE: usize = 12;
 pub const EOF: [u8; 5] = [0, 0, 0, 0, 0];
 pub const EOW: [u8; 5] = [0, 0, 0, 0, 1];
 pub fn collect_bgp(start: u64, end: u64) -> BgpkitBroker {
@@ -38,10 +33,10 @@ pub fn parse_bgp(broker: BgpkitBroker, sender: Sender<Vec<u8>>) -> Result<(), an
     // make copy of sender for each par iter?
     use std::time::Instant;
     let urls = broker.into_iter().map(|x| x.url).collect::<Vec<String>>();
-    let chunk_count = urls.iter().count().div_ceil(CHNKSZ);
+    let chunk_count = urls.iter().count().div_ceil(CHUNK_SIZE);
     let mut index = 0usize;
 
-    urls.chunks(CHNKSZ).for_each(|chunketh| {
+    urls.chunks(CHUNK_SIZE).for_each(|chunketh| {
         index += 1;
         info!("v-- {index}/{chunk_count} chunk processing --v");
         let now = Instant::now();
