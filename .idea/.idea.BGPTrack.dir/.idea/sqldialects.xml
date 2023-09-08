@@ -1,8 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
   <component name="SqlDialectMappings">
-    <file url="file://$PROJECT_DIR$/migrations/0004_BGP_table.sql" dialect="PostgreSQL" />
-    <file url="file://$PROJECT_DIR$/migrations/0005_BGP_table.sql" dialect="PostgreSQL" />
-    <file url="file://$PROJECT_DIR$/migrations/0006_BGP_table.sql" dialect="PostgreSQL" />
+    <file url="file://$PROJECT_DIR$/migrations/0001_BGP_table.sql" dialect="PostgreSQL" />
+    <file url="file://$PROJECT_DIR$/trash/00017_BGP_table.sql" dialect="PostgreSQL" />
+    <file url="file://$PROJECT_DIR$/trash/00018_BGP_table.sql" dialect="PostgreSQL" />
+    <file url="file://$PROJECT_DIR$/trash/0004_BGP_table.sql" dialect="PostgreSQL" />
+    <file url="file://$PROJECT_DIR$/trash/0005_BGP_table.sql" dialect="PostgreSQL" />
+    <file url="file://$PROJECT_DIR$/trash/0006_BGP_table.sql" dialect="PostgreSQL" />
+    <file url="file://$PROJECT_DIR$/trash/0011_BGP_table.sql" dialect="PostgreSQL" />
   </component>
 </project>

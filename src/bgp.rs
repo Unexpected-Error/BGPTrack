@@ -1,25 +1,29 @@
+#![feature(int_roundings)]
 // Logs and Errors
 #[allow(unused_imports)]
 use anyhow::Context;
 #[allow(unused_imports)]
-#[cfg(debug_assertions)]
-use log::{info, warn};
+use log::{info, warn, error, debug};
 
 // BGP data
 use uuid::Uuid;
-use ipnetwork::IpNetwork;
-use std::net::IpAddr;
-use ipnet::IpNet;
-use crate::db_writer::types::{ASPathSeg, Announcement, AP_Segments, DELIMITER};
+
+use crate::db_writer::types::{APSegments, ASPathSeg, DELIMITER};
 use bgpkit_broker::BgpkitBroker;
-use bgpkit_parser::{BgpkitParser, models::{AsPathSegment, ElemType}};
+use bgpkit_parser::{
+    models::{AsPathSegment, ElemType},
+    BgpkitParser,
+};
 
 // Data Processing
+use crossbeam_channel::{SendError, Sender};
+use itertools::Itertools;
 use rayon::prelude::*;
-use crossbeam_channel::Sender;
-
+const CHNKSZ: usize = 12;
+pub const EOF: [u8; 5] = [0, 0, 0, 0, 0];
+pub const EOW: [u8; 5] = [0, 0, 0, 0, 1];
 pub fn collect_bgp(start: u64, end: u64) -> BgpkitBroker {
-    let broker = bgpkit_broker::BgpkitBroker::new()
+    let broker = BgpkitBroker::new()
         .project("riperis")
         .collector_id("rrc25")
         //.data_type("update")
@@ -31,104 +35,73 @@ pub fn collect_bgp(start: u64, end: u64) -> BgpkitBroker {
 }
 
 pub fn parse_bgp(broker: BgpkitBroker, sender: Sender<Vec<u8>>) -> Result<(), anyhow::Error> {
-    broker
-        .into_iter()
-        .map(|x| x.url).collect::<Vec<String>>()
-        .par_iter()
-        .for_each(|url| {
-            let parser = BgpkitParser::new(url.as_str()).unwrap();
-            #[cfg(debug_assertions)]
-            { info!("parsing {} ...", url.as_str()); }
-            let data = parser.into_elem_iter()
-                .flat_map(|elem| {
-                    // let ann = Announcement {
-                    //     id: Uuid::new_v4(),
-                    //     asn: elem.peer_asn.asn as i64,
-                    //     withdrawal: match elem.elem_type {
-                    //         ElemType::ANNOUNCE => false,
-                    //         ElemType::WITHDRAW => true,
-                    //     },
-                    //     timestamp: elem.timestamp,
-                    //     prefix: match elem.prefix.prefix {
-                    //         IpNet::V4(x) => IpNetwork::new(IpAddr::from(x.addr()), x.prefix_len()),
-                    //         IpNet::V6(x) => IpNetwork::new(IpAddr::from(x.addr()), x.prefix_len()),
-                    //     }
-                    //         .context("Matching IPs")
-                    //         .unwrap(),
-                    //     as_path_segments: match elem.as_path {
-                    //         None => vec![],
-                    //         Some(as_p) => as_p
-                    //             .segments
-                    //             .par_iter()
-                    //             .map(|as_p_seg| match as_p_seg {
-                    //                 AsPathSegment::AsSequence(x) => ASPathSeg {
-                    //                     seq: true,
-                    //                     confed: false,
-                    //                     as_path: x.par_iter().map(|&y| y.asn as i64).collect(),
-                    //                 },
-                    //                 AsPathSegment::AsSet(x) => ASPathSeg {
-                    //                     seq: false,
-                    //                     confed: false,
-                    //                     as_path: x.par_iter().map(|&y| y.asn as i64).collect(),
-                    //                 },
-                    //                 AsPathSegment::ConfedSequence(x) => ASPathSeg {
-                    //                     seq: true,
-                    //                     confed: true,
-                    //                     as_path: x.par_iter().map(|&y| y.asn as i64).collect(),
-                    //                 },
-                    //                 AsPathSegment::ConfedSet(x) => ASPathSeg {
-                    //                     seq: false,
-                    //                     confed: true,
-                    //                     as_path: x.par_iter().map(|&y| y.asn as i64).collect(),
-                    //                 },
-                    //             })
-                    //             .collect::<Vec<ASPathSeg>>(),
-                    //     },
-                    // };
-                    format!("{ID}{DELIMITER}{ASN}{DELIMITER}{WITHDRAW}{DELIMITER}{TIMESTAMP:?}{DELIMITER}{PREFIX}{DELIMITER}{AS_PATH}\n", 
-                            ID = Uuid::new_v4(),
-                            ASN = elem.peer_asn.asn,
-                            WITHDRAW = match elem.elem_type {
-                                        ElemType::ANNOUNCE => 0,
-                                        ElemType::WITHDRAW => 1,
-                                    },
-                            TIMESTAMP = elem.timestamp,
-                            PREFIX = elem.prefix.prefix.addr().to_string() + "/" + &*elem.prefix.prefix.prefix_len().to_string(),
-                            AS_PATH = AP_Segments(
-                                match elem.as_path {
-                                    None => vec![],
-                                    Some(as_p) => as_p
-                                        .segments
-                                        .iter()
-                                        .map(|as_p_seg| match as_p_seg {
-                                            AsPathSegment::AsSequence(x) => ASPathSeg {
-                                                seq: true,
-                                                confed: false,
-                                                as_path: x.par_iter().map(|&y| y.asn as i64).collect(),
-                                            },
-                                            AsPathSegment::AsSet(x) => ASPathSeg {
-                                                seq: false,
-                                                confed: false,
-                                                as_path: x.par_iter().map(|&y| y.asn as i64).collect(),
-                                            },
-                                            AsPathSegment::ConfedSequence(x) => ASPathSeg {
-                                                seq: true,
-                                                confed: true,
-                                                as_path: x.par_iter().map(|&y| y.asn as i64).collect(),
-                                            },
-                                            AsPathSegment::ConfedSet(x) => ASPathSeg {
-                                                seq: false,
-                                                confed: true,
-                                                as_path: x.par_iter().map(|&y| y.asn as i64).collect(),
-                                            },
-                                        })
-                                        .collect::<Vec<ASPathSeg>>(),
-                                }
-                            )
-                    ).into_bytes()
-                })
-                .collect::<Vec<u8>>();
-            sender.send(data).expect("For_each par_iter broke on send");
+    // make copy of sender for each par iter?
+    use std::time::Instant;
+    let urls = broker.into_iter().map(|x| x.url).collect::<Vec<String>>();
+    let chunk_count = urls.iter().count().div_ceil(CHNKSZ);
+    let mut index = 0usize;
+
+    urls.chunks(CHNKSZ).for_each(|chunketh| {
+        index += 1;
+        info!("v-- {index}/{chunk_count} chunk processing --v");
+        let now = Instant::now();
+        chunketh.par_iter()
+            .filter_map(|url| {info!("--- parsing {}", url.as_str()); BgpkitParser::new(url.as_str()).ok()})
+            .for_each_with(sender.clone(), |tx, parser| {
+               let data = parser.into_elem_iter()
+                   .flat_map(|elem| {
+                       format!("{ID}{DELIMITER}{ASN}{DELIMITER}{WITHDRAW}{DELIMITER}{TIMESTAMP:?}{DELIMITER}{PREFIX}{DELIMITER}{AS_PATH}\n",
+                               ID = Uuid::new_v4(),
+                               ASN = elem.peer_asn.asn,
+                               WITHDRAW = match elem.elem_type {
+                                   ElemType::ANNOUNCE => 0,
+                                   ElemType::WITHDRAW => 1,
+                               },
+                               TIMESTAMP = elem.timestamp,
+                               PREFIX = elem.prefix.prefix.addr().to_string() + "/" + &*elem.prefix.prefix.prefix_len().to_string(),
+                               AS_PATH = APSegments(
+                                   match elem.as_path {
+                                       None => vec![],
+                                       Some(as_p) => as_p
+                                           .segments
+                                           .iter()
+                                           .map(|as_p_seg| match as_p_seg {
+                                               AsPathSegment::AsSequence(x) => ASPathSeg {
+                                                   seq: true,
+                                                   confed: false,
+                                                   as_path: x.par_iter().map(|&y| i64::from(y.asn)).collect(),
+                                               },
+                                               AsPathSegment::AsSet(x) => ASPathSeg {
+                                                   seq: false,
+                                                   confed: false,
+                                                   as_path: x.par_iter().map(|&y| i64::from(y.asn)).collect(),
+                                               },
+                                               AsPathSegment::ConfedSequence(x) => ASPathSeg {
+                                                   seq: true,
+                                                   confed: true,
+                                                   as_path: x.par_iter().map(|&y| i64::from(y.asn)).collect(),
+                                               },
+                                               AsPathSegment::ConfedSet(x) => ASPathSeg {
+                                                   seq: false,
+                                                   confed: true,
+                                                   as_path: x.par_iter().map(|&y| i64::from(y.asn)).collect(),
+                                               },
+                                           })
+                                           .collect::<Vec<ASPathSeg>>(),
+                                   }
+                               )
+                       ).into_bytes()
+                   })
+                   .collect::<Vec<u8>>();
+               match tx.send(data) {
+                   Ok(_) => {}
+                   Err(e) => { error!("Channel Disconnected, data:\n\t{e}"); }
+               }
         });
+        sender.send(Vec::from(EOW)).expect("Could not send EOW");
+        let elapsed = now.elapsed();
+        info!("^-- {index}/{chunk_count} Done in: {:.2?} --^", elapsed);
+    });
+    sender.send(Vec::from(EOF)).expect("Could not send EOF");
     Ok(())
 }
