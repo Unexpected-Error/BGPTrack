@@ -80,7 +80,7 @@ use time::OffsetDateTime;
 use anyhow::{Context};
 use itertools::Itertools;
 use lazy_static::lazy_static;
-use log::{debug, info, warn};
+use log::{debug, warn};
 
 
 lazy_static! {

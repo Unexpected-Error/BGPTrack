@@ -12,7 +12,7 @@ use crate::bgp::{EOF, EOW};
 // db
 mod db_writer;
 use db_writer::{delete_all, open_db,find_short_lived, Processor, types::DELIMITER};
-use sqlx::{Connection, Error, PgPool};
+use sqlx::{Connection, PgPool};
 
 // bag of tools
 use crossbeam_channel::bounded;

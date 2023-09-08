@@ -16,7 +16,7 @@ use bgpkit_parser::{
 };
 
 // Data Processing
-use crossbeam_channel::{SendError, Sender};
+use crossbeam_channel::{Sender};
 use itertools::Itertools;
 use rayon::prelude::*;
 const CHNKSZ: usize = 12;
