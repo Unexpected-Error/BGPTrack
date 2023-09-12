@@ -77,11 +77,15 @@ use crate::db_writer::types::{ASPathSeg, Announcement, UnixTimeStamp};
 use time::OffsetDateTime;
 
 // errors, logs, tools, etc
-use anyhow::{Context};
+use anyhow::{anyhow, Context, Result};
 use clap::Subcommand;
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use log::{debug, info, warn};
+use async_stream::{stream, try_stream};
+use fix_hidden_lifetime_bug::fix_hidden_lifetime_bug;
+use futures::{pin_mut, Stream};
+use futures::stream::StreamExt;
 
 
 lazy_static! {
@@ -146,7 +150,7 @@ pub(crate) async fn ip_search(
         .await?;
     Ok(res)
 }
-
+/*
 /// Enum with impl'd fn for all ways of processing a iter of [`Announcement`]
 ///
 /// &self.process() handles picking the fn for the given enum
@@ -159,10 +163,8 @@ pub(crate) enum Processor {
 }
 impl Processor {
     /// Picks correct fn for the given variant of [`Processor`]
-    pub(crate) fn process(
-        &self,
-        thing: impl Iterator<Item = (IpNetwork, OffsetDateTime, OffsetDateTime, i64)>,
-    ) -> Vec<(IpNetwork, OffsetDateTime, OffsetDateTime, i64)> {
+    pub(crate) fn process<S: Stream<Item = Vec<ShortLivedRec>>>(input: S)
+    -> impl Stream<Item = u32> {
         match self {
             Processor::OverallTimeRange => Self::overall_time_range(thing),
             Processor::Raw => Self::collect(thing)
@@ -174,6 +176,7 @@ impl Processor {
         thing
             .collect::<Vec<(IpNetwork, OffsetDateTime, OffsetDateTime, i64)>>()
     }
+    // Same prefix and asn, but different ann pointing to the same withdraw? Merge all ann/withdraws from a asn about a prefix
     fn overall_time_range(
         thing: impl Iterator<Item = (IpNetwork, OffsetDateTime, OffsetDateTime, i64)>,
     ) -> Vec<(IpNetwork, OffsetDateTime, OffsetDateTime, i64)> {
@@ -189,63 +192,80 @@ impl Processor {
             })
             .collect::<Vec<(IpNetwork, OffsetDateTime, OffsetDateTime, i64)>>()
     }
-}
+}*/
 
 /// Collects all short lived announcements and runs a [`Processor`] on them, returning the results 
+/// MAKE SURE TO PIN FOR USE
+/// pin_mut!(n);
 pub(crate) async fn find_short_lived(
     window: UnixTimeStamp,
     start: UnixTimeStamp,
     stop: UnixTimeStamp,
     limit: Option<i64>,
-    processor: Processor,
+    yield_window: i32,
+    // processor: Processor,
     pool: &sqlx::PgPool,
-) -> Result<Vec<(IpNetwork, OffsetDateTime, OffsetDateTime, i64)>, anyhow::Error> {
+) -> impl Stream< Item = Result<PotentialHijack/*(IpNetwork, OffsetDateTime, OffsetDateTime, i64)*/> > + '_ {
+    try_stream! {
+        debug!("Start: {start}, Stop: {stop}, chunk size: {}", yield_window as usize);
+        for mut i in &((start+1)..stop).chunks(yield_window as usize) {
+            // debug!("Chunk: {i:?}");
+            let sub_start = i.next();
+            let mut sub_stop = i.last();
+            
+            debug!("Short lived sub-query window is now between {:?} and {:?}", sub_start, sub_stop );
+            
+            // rare edge case where the last chunk is exactly 1 sec and thus the iter only has one value to yield
+            if sub_start.is_some() && sub_stop.is_none() { 
+                sub_stop = sub_start
+            }
+            
+            for potential in PotentialHijack::query_short_lived_window(window, (sub_start.ok_or(anyhow!("No start time"))?-1), sub_stop.ok_or(anyhow!(""))?, limit, pool).await? {
+                yield potential;
+            }
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct PotentialHijack {
+    pub(crate) prefix: IpNetwork,
+    pub(crate) ann_time: OffsetDateTime,
+    pub(crate) wd_time: OffsetDateTime,
+    pub(crate) asn: i64
+}
+
+impl PotentialHijack {
+    async fn query_short_lived_window(window: UnixTimeStamp, start: UnixTimeStamp, stop: UnixTimeStamp, limit: Option<i64>, pool: &sqlx::PgPool) -> Result<Vec<Self>> {
+        debug!("Running sub-window of short lived query");
     use std::time::Instant;
     let now = Instant::now();
-    
+    let tmp = 
         if let Some(n) = limit {
-            let tmp = sqlx::query!(
+        sqlx::query_as!(PotentialHijack, 
             r#"
-WITH g AS (SELECT a1.asn              as common_asn,
-                  a1.prefix           as common_prefix,
-                  MIN(a2.timestamp)   AS earliest_withdrawal_timestamp,
-                  a1.as_path_segments AS AS_PATH,
-                  a1.id AS ann_id,
-                  a1.timestamp as ann_time
-           FROM Announcement AS a1
-                    JOIN Announcement AS a2 ON a1.prefix = a2.prefix
-               AND a1.asn = a2.asn
-               AND a2.withdrawal = true
-               AND ABS(a1.timestamp - a2.timestamp) <= $1
-               AND a2.timestamp > a1.timestamp
-           WHERE a1.withdrawal = FALSE
-           AND a2.timestamp < $2
-           AND a1.timestamp < $3
-           AND a2.timestamp > $4
-           AND a1.timestamp > $5
-           GROUP BY a1.id,
-                    a1.asn,
-                    a1.prefix,
-                    a1.as_path_segments,
-                    a1.timestamp
-           LIMIT $6
-           )
 SELECT
-    g.ann_id as ANN_ID,
-    ann.id as WD_ID,
-    g.common_asn as ASN,
-    g.common_prefix as PREFIX,
-    g.AS_PATH as "as_path_segments: Vec<ASPathSeg>",
-    to_timestamp(g.ann_time) as ANN_TIME,
-    to_timestamp(g.earliest_withdrawal_timestamp) as WD_TIME,
-    (to_timestamp(g.earliest_withdrawal_timestamp) - to_timestamp(g.ann_time))::time AS duration
-FROM g
-         left join announcement as ann on
-            ann.asn = g.common_asn AND
-            ann.withdrawal = true AND
-            ann.timestamp = g.earliest_withdrawal_timestamp AND
-            ann.prefix = g.common_prefix;
-
+      a1.asn                          AS asn,
+      a1.prefix                       AS prefix,
+      to_timestamp(MIN(a2.timestamp)) AS "wd_time!",
+      to_timestamp(a1.timestamp)      AS "ann_time!"
+FROM Announcement AS a1
+        JOIN Announcement AS a2 ON a1.prefix = a2.prefix
+   AND a1.asn = a2.asn
+   AND a2.withdrawal = true
+   AND ABS(a1.timestamp - a2.timestamp) < $1
+   AND a2.timestamp > a1.timestamp
+WHERE a1.withdrawal = FALSE
+AND a2.timestamp < $2
+AND a1.timestamp < $3
+AND a2.timestamp >= $4
+AND a1.timestamp >= $5
+GROUP BY a1.id,
+        a1.asn,
+        a1.prefix,
+        a1.as_path_segments,
+        a1.timestamp
+LIMIT $6
 "#,
             f64::from(window),
             f64::from(stop + window), // beyond the window, no valid withdraws are present
@@ -254,62 +274,32 @@ FROM g
             f64::from(start),
             (n)
         )
-                .fetch_all(pool)
-                .await?;
-            let tmp = tmp
-                .iter()
-                .filter_map(|rec| {
-                    if let (Some(ann_time), Some(wd_time)) = (rec.ann_time, rec.wd_time) {
-                        Some((rec.prefix, ann_time, wd_time, rec.asn))
-                    } else {
-                        None
-                    }
-                });
-            let elapsed = now.elapsed();
-            info!("Query took: {:.2?}", elapsed);
-            Ok(processor.process(tmp))
-        } else {
-            let tmp = sqlx::query!(
+            .fetch_all(pool)
+            .await?
+    } else {
+        sqlx::query_as!(PotentialHijack, 
             r#"
-WITH g AS (SELECT a1.asn              as common_asn,
-                  a1.prefix           as common_prefix,
-                  MIN(a2.timestamp)   AS earliest_withdrawal_timestamp,
-                  a1.as_path_segments AS AS_PATH,
-                  a1.id AS ann_id,
-                  a1.timestamp as ann_time
-           FROM Announcement AS a1
-                    JOIN Announcement AS a2 ON a1.prefix = a2.prefix
-               AND a1.asn = a2.asn
-               AND a2.withdrawal = true
-               AND ABS(a1.timestamp - a2.timestamp) <= $1
-               AND a2.timestamp > a1.timestamp
-           WHERE a1.withdrawal = FALSE
-           AND a2.timestamp < $2
-           AND a1.timestamp < $3
-           AND a2.timestamp > $4
-           AND a1.timestamp > $5
-           GROUP BY a1.id,
-                    a1.asn,
-                    a1.prefix,
-                    a1.as_path_segments,
-                    a1.timestamp
-           )
 SELECT
-    g.ann_id as ANN_ID,
-    ann.id as WD_ID,
-    g.common_asn as ASN,
-    g.common_prefix as PREFIX,
-    g.AS_PATH as "as_path_segments: Vec<ASPathSeg>",
-    to_timestamp(g.ann_time) as ANN_TIME,
-    to_timestamp(g.earliest_withdrawal_timestamp) as WD_TIME,
-    (to_timestamp(g.earliest_withdrawal_timestamp) - to_timestamp(g.ann_time))::time AS duration
-FROM g
-         left join announcement as ann on
-            ann.asn = g.common_asn AND
-            ann.withdrawal = true AND
-            ann.timestamp = g.earliest_withdrawal_timestamp AND
-            ann.prefix = g.common_prefix;
-
+      a1.asn                          AS asn,
+      a1.prefix                       AS prefix,
+      to_timestamp(MIN(a2.timestamp)) AS "wd_time!",
+      to_timestamp(a1.timestamp)      AS "ann_time!"
+FROM Announcement AS a1
+        JOIN Announcement AS a2 ON a1.prefix = a2.prefix
+   AND a1.asn = a2.asn
+   AND a2.withdrawal = true
+   AND ABS(a1.timestamp - a2.timestamp) < $1
+   AND a2.timestamp > a1.timestamp
+WHERE a1.withdrawal = FALSE
+AND a2.timestamp < $2
+AND a1.timestamp < $3
+AND a2.timestamp >= $4
+AND a1.timestamp >= $5
+GROUP BY a1.id,
+        a1.asn,
+        a1.prefix,
+        a1.as_path_segments,
+        a1.timestamp
 "#,
             f64::from(window),
             f64::from(stop + window), // beyond the window, no valid withdraws are present
@@ -317,21 +307,15 @@ FROM g
             f64::from(start),           // start of ann window, withdraws may be immediate
             f64::from(start),
         )
-                .fetch_all(pool)
-                .await?;
-            let tmp = tmp
-                .iter()
-                .filter_map(|rec| {
-                    if let (Some(ann_time), Some(wd_time)) = (rec.ann_time, rec.wd_time) {
-                        Some((rec.prefix, ann_time, wd_time, rec.asn))
-                    } else {
-                        None
-                    }
-                });
-            let elapsed = now.elapsed();
-            info!("Query took: {:.2?}", elapsed);
-            Ok(processor.process(tmp))
-        }
-    
-    
+            .fetch_all(pool)
+            .await?
+    };
+        let elapsed = now.elapsed();
+        info!("Query took: {:.2?}", elapsed);
+        Ok(tmp)
 }
+    pub(crate) async fn filter_by_known_ip(&self) -> bool {
+        true
+    }
+}
+

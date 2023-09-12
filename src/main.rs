@@ -1,5 +1,7 @@
+#![feature(async_closure)]
 // Logs and Errors
 use anyhow::{Context, Result};
+use async_stream::stream;
 use fern::colors::{Color, ColoredLevelConfig};
 #[allow(unused_imports)]
 use log::{debug, error, info, warn};
@@ -11,31 +13,37 @@ use bgp::{collect_bgp, parse_bgp};
 
 // db
 mod db_writer;
-use db_writer::{delete_all, find_short_lived, open_db, types::DELIMITER, Processor};
+use db_writer::{delete_all, find_short_lived, open_db, types::DELIMITER};
 use sqlx::{Connection, PgPool};
 
 // bag of tools
-use crate::db_writer::ip_search;
+use crate::db_writer::{ip_search, PotentialHijack};
 use clap::{Parser, Subcommand};
 use crossbeam_channel::bounded;
+use futures::{pin_mut, stream, StreamExt};
 use itertools::{Itertools, MinMaxResult};
+use lazy_static::lazy_static;
+use serde::{Deserialize, Serialize};
 
+// Seclytics API
+mod seclytics_api;
+use seclytics_api::cidr_is_malicious;
 #[derive(Subcommand)]
 enum Job {
-    #[command(about="WIPES DATABSE, then repopulates")]
+    #[command(about = "WIPES DATABASE, then repopulates")]
     ReloadData,
-    #[command(about="Collects all short lived announcements (<15 minutes)")]
+    #[command(about = "Collects all short lived announcements (<15 minutes)")]
     FindShortlived {
         #[arg(short, long, value_parser = clap::value_parser!(i64).range(0..), help="How many rows to return. Leave blank for all")]
         limit: Option<i64>,
-
-        #[command(subcommand)]
-        format: Processor,
+        // #[command(subcommand)]
+        // format: Processor,
     },
-    #[command(about="Collects all announcements for a prefix")]
-    SearchIP {
-        ip: String,
-    },
+    #[command(about = "Collects all announcements for a prefix")]
+    SearchIP { ip: String },
+    
+    #[command(about = "Runs arbitrary commands, testing new code only")]
+    Test,
 }
 
 #[derive(Parser)]
@@ -48,68 +56,135 @@ struct Args {
     command: Job,
     #[arg(short, long)]
     verbose: bool,
+    #[arg(short, long)]
+    quiet: bool,
 }
+
+
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // console_subscriber::init(); // use with tokio-console
-    // if atty::is(atty::Stream::Stdout) {
-    //     println!("I'm a terminal");
-    // } else {
-    //     println!("I'm not");
-    // }
+
     let args = Args::parse();
-    set_up_logging(if !args.verbose {
-        log::LevelFilter::Info
-    } else {
+
+    // Set up appropriate logging level
+    set_up_logging(if args.quiet {
+        log::LevelFilter::Off
+    } else if args.verbose {
         log::LevelFilter::Debug
+    } else {
+        log::LevelFilter::Info
     })?;
+
+    // Setup pool of connections to db
     let pool = open_db().await?;
 
     match args.command {
         Job::ReloadData => {
             reload_data(pool).await?;
         }
-        Job::FindShortlived { format, limit } => {
-            if limit.is_none() {warn!("Searching without any limits, may take a really long time")}
-            else {warn!("Long running query starting...");}
-            let data = find_short_lived(900, 1692223200, 1692226800, limit, format, &pool).await?;
-            // start can be 0, and stop `std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() + 60` 
-            // for when start/stop are implemented arguments to the program
-            if data.len() < 750
-            // lets not blow up the computer...
-            {
-                data.iter()
-                    .sorted_unstable_by_key(|point| (point.3, point.0, point.1, point.2))
-                    .for_each(|datapoint| {
-                        info!(
-                            "ip: {},\tfirst seen: {} {},\tlast seen: {} {},\tASN: {}",
-                            datapoint.0,
-                            datapoint.1.date(),
-                            datapoint.1.time(),
-                            datapoint.2.date(),
-                            datapoint.2.time(),
-                            datapoint.3
-                        );
-                    });
+        Job::FindShortlived { limit } => {
+            // additionally warn if we're scanning the whole database, this may take literally forever :/
+            if limit.is_none() {
+                warn!("Searching without any limits, may take a really long time")
+            } else {
+                warn!("Long running query starting...");
             }
-            info!("Dataset length = {}", data.len());
+            
+            
+            // start can be 0, and stop `std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() + 60`
+            // for when start/stop are implemented arguments to the program
+            let data = find_short_lived(900, 1692223200, 1692226800, limit, 3600, &pool).await;
+            pin_mut!(data);
+            
+            let potentials = data.collect::<Vec<Result<PotentialHijack>>>().await;
+            
+            // Vec<Results<_>> -> Results<Vec<_>> -> Vec<_>
+            let potentials: Vec<PotentialHijack> = potentials
+                .into_iter()
+                .collect::<Result<Vec<PotentialHijack>>>()
+                .context("was attempting to move results out of Vec")?;
+
+            // Sort Potential Hijacks by asn for easier matching
+            let p_iter = potentials
+                .into_iter()
+                .sorted_unstable_by_key(|x| x.asn)
+                .collect_vec();
+            let mut p_iter = p_iter.iter().peekable();
+            
+
+            let asn_group_gen = stream! {
+                let mut flag: bool = true;
+                loop {
+                    if flag {
+                        flag = false;
+                        match p_iter.peek() {
+                            None => {
+                                break;
+                            }
+                            Some(x) => {
+                                let asn = x.asn; //implicit copy to prevent double mut ref
+                                let ans = p_iter.peeking_take_while(|&y| {y.asn == asn}).collect_vec();
+                                if ans.len() == 0 {continue;}
+                                yield ans;
+                            }
+                        }
+
+                    } else {
+                        match p_iter.next().as_ref() {
+                            None => {
+                                break;
+                            }
+                            Some(x) => {
+                                let ans = p_iter.peeking_take_while(|&y| {x.asn == y.asn}).collect_vec();
+                                if ans.len() == 0 {continue;}
+                                yield ans;
+                            }
+                        }
+
+
+                    }
+                }
+            };
+            pin_mut!(asn_group_gen);
+
+            while let Some(asn_group) = asn_group_gen.next().await {
+                debug!("AS{} had {} short lived ann", asn_group[0].asn, asn_group.len()); // AS38254
+                if asn_group[0].asn == 29049 {
+                    'inner: for ann in asn_group {
+                        if ann.prefix == "103.100.227.0/24".parse()? && cidr_is_malicious(ann.prefix).await? {
+                            warn!("Malicious prefix: {} from asn {}",ann.prefix, ann.asn);
+                            break 'inner;
+                        }
+                    }
+                }
+            }
+            
         }
         Job::SearchIP { ip } => {
             match ip_search(ip.parse()?, &pool).await {
                 Ok(n) => {
-                    match n.iter().minmax_by_key(|k| {k.timestamp}) { //a.timestamp.partial_cmp(&b.timestamp).unwrap()
-
-                        MinMaxResult::NoElements => {info!("Sorry, no announcements found for {ip}")}
-                        MinMaxResult::OneElement(data) => {info!("Got data:\n{data:#?}")}
-                        MinMaxResult::MinMax(min, max) => {info!("Got data:\n{max:#?}\n{min:#?}")}
+                    match n.iter().minmax_by_key(|k| k.timestamp) {
+                        //a.timestamp.partial_cmp(&b.timestamp).unwrap()
+                        MinMaxResult::NoElements => {
+                            info!("Sorry, no announcements found for {ip}")
+                        }
+                        MinMaxResult::OneElement(data) => {
+                            info!("Got data:\n{data:#?}")
+                        }
+                        MinMaxResult::MinMax(min, max) => {
+                            info!("Got data:\n{max:#?}\n{min:#?}")
+                        }
                     };
-                    
                 }
                 Err(n) => {
                     error!("Something went wrong: {n}");
                 }
             };
+        }
+        Job::Test => {
+            error!("No tests to run!");
         }
     }
 
