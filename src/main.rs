@@ -1,6 +1,9 @@
 #![feature(async_closure)]
+#![feature(generic_const_exprs)]
+#![feature(let_chains)]
+
 // Logs and Errors
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use async_stream::stream;
 use fern::colors::{Color, ColoredLevelConfig};
 #[allow(unused_imports)]
@@ -20,14 +23,12 @@ use sqlx::{Connection, PgPool};
 use crate::db_writer::{ip_search, PotentialHijack};
 use clap::{Parser, Subcommand};
 use crossbeam_channel::bounded;
-use futures::{pin_mut, stream, StreamExt};
+use futures::{future, pin_mut, StreamExt};
 use itertools::{Itertools, MinMaxResult};
-use lazy_static::lazy_static;
-use serde::{Deserialize, Serialize};
 
 // Seclytics API
 mod seclytics_api;
-use seclytics_api::cidr_is_malicious;
+use seclytics_api::asn_is_malicious;
 #[derive(Subcommand)]
 enum Job {
     #[command(about = "WIPES DATABASE, then repopulates")]
@@ -41,7 +42,7 @@ enum Job {
     },
     #[command(about = "Collects all announcements for a prefix")]
     SearchIP { ip: String },
-    
+
     #[command(about = "Runs arbitrary commands, testing new code only")]
     Test,
 }
@@ -59,8 +60,6 @@ struct Args {
     #[arg(short, long)]
     quiet: bool,
 }
-
-
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -91,15 +90,14 @@ async fn main() -> Result<()> {
             } else {
                 warn!("Long running query starting...");
             }
-            
-            
+
             // start can be 0, and stop `std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() + 60`
             // for when start/stop are implemented arguments to the program
-            let data = find_short_lived(900, 1692223200, 1692226800, limit, 3600, &pool).await;
+            let data = find_short_lived(900, 1692223200, 1692230400, limit, 3600, &pool).await;
             pin_mut!(data);
-            
+
             let potentials = data.collect::<Vec<Result<PotentialHijack>>>().await;
-            
+
             // Vec<Results<_>> -> Results<Vec<_>> -> Vec<_>
             let potentials: Vec<PotentialHijack> = potentials
                 .into_iter()
@@ -112,7 +110,6 @@ async fn main() -> Result<()> {
                 .sorted_unstable_by_key(|x| x.asn)
                 .collect_vec();
             let mut p_iter = p_iter.iter().peekable();
-            
 
             let asn_group_gen = stream! {
                 let mut flag: bool = true;
@@ -148,19 +145,40 @@ async fn main() -> Result<()> {
                 }
             };
             pin_mut!(asn_group_gen);
-
+            /*
+            malware / malicousis
+            botnet
+            phsiing
+            scanner
+            spam
+            proxy
+            */
+            let mut iterations = 0;
+            let wclient = reqwest::Client::new();
             while let Some(asn_group) = asn_group_gen.next().await {
-                debug!("AS{} had {} short lived ann", asn_group[0].asn, asn_group.len()); // AS38254
-                if asn_group[0].asn == 29049 {
-                    'inner: for ann in asn_group {
-                        if ann.prefix == "103.100.227.0/24".parse()? && cidr_is_malicious(ann.prefix).await? {
-                            warn!("Malicious prefix: {} from asn {}",ann.prefix, ann.asn);
-                            break 'inner;
-                        }
-                    }
+                iterations += 1;
+                // AS38254 // if asn_group[0].asn == 29049 {
+
+                let cidrs = asn_group.iter().map(|x| x.prefix).collect_vec();
+
+                // info!("does it exist {}", cidrs.contains(&"85.132.91.0/24".parse()?));
+                let bad_cidr = asn_is_malicious(asn_group[0].asn, cidrs, &wclient).await?;
+                if bad_cidr == 0 {
+                    continue;
                 }
+                warn!(
+                    "Malicious asn: {},\t{}%",
+                    asn_group[0].asn,
+                    bad_cidr / asn_group.len()
+                );
+                debug!(
+                    "AS{} had {} short lived ann",
+                    asn_group[0].asn,
+                    asn_group.len()
+                );
             }
-            
+
+            debug!("Requests {iterations}");
         }
         Job::SearchIP { ip } => {
             match ip_search(ip.parse()?, &pool).await {
@@ -184,7 +202,15 @@ async fn main() -> Result<()> {
             };
         }
         Job::Test => {
-            error!("No tests to run!");
+            info!(
+                "count of bad: {}",
+                asn_is_malicious(
+                    29049,
+                    vec!["85.132.91.0/24".parse()?],
+                    &reqwest::Client::new()
+                )
+                .await?
+            );
         }
     }
 
@@ -192,6 +218,13 @@ async fn main() -> Result<()> {
 }
 
 async fn reload_data(pool: PgPool) -> Result<()> {
+    // sqlx::query_file!("migrations/20230915002226_indexes.down.sql")
+    sqlx::query!("ALTER TABLE Announcement DROP CONSTRAINT Announcement_pkey")
+        .execute(&pool)
+        .await?;
+    sqlx::query!("DROP INDEX ASN").execute(&pool).await?;
+    sqlx::query!("DROP INDEX WD").execute(&pool).await?;
+    sqlx::query!("DROP INDEX TS").execute(&pool).await?;
     delete_all(&pool).await?;
 
     let mut conn = pool.acquire().await?;
@@ -199,13 +232,16 @@ async fn reload_data(pool: PgPool) -> Result<()> {
     let (sender, receiver) = bounded::<Vec<u8>>(0);
 
     let handle1 = tokio::task::spawn_blocking(move || {
-        parse_bgp(collect_bgp(1692223200, 1692230400), sender)?;
+        parse_bgp(collect_bgp(1660687200, 1661032800), sender)?;
         anyhow::Ok(())
         // 15 min of data 1692223200 1692223953
         // 1 hours 1692226800
-        // 2 hours 1692230400
+        // 2 hours 1692230400 <--
         // 1 day 1692309600
         // 3 days 1692482400
+
+        // 1660687200
+        // 1661032800
     });
     let handle2 = tokio::task::spawn(async move {
         'Outer: loop {
@@ -259,6 +295,42 @@ async fn reload_data(pool: PgPool) -> Result<()> {
     handle2
         .await
         .with_context(|| ">>> Saving BGP data panicked")??;
+
+    {
+        use std::time::Instant;
+        let now = Instant::now();
+        
+        sqlx::query!("alter table Announcement add primary key (id)")
+            .execute(&pool)
+            .await?;
+        
+        let duration = now.elapsed();
+        info!(">>> Added p key in: {:.2?}", duration);
+        let prev_duration = duration;
+        
+        sqlx::query!("CREATE INDEX ASN on Announcement (asn)")
+            .execute(&pool)
+            .await?;
+        
+        let duration = now.elapsed();
+        info!(">>> Added asn index in: {:.2?}", prev_duration - duration);
+        let prev_duration = duration;
+        
+        sqlx::query!("CREATE INDEX WD on Announcement (withdrawal)")
+            .execute(&pool)
+            .await?;
+        
+        let duration = now.elapsed();
+        info!(">>> Added wd index in: {:.2?}", prev_duration - duration);
+        let prev_duration = duration;
+        
+        sqlx::query!("CREATE INDEX TS on Announcement (timestamp)")
+            .execute(&pool)
+            .await?;
+        
+        let duration = now.elapsed();
+        info!(">>> Added ts index in: {:.2?}", prev_duration - duration);
+    }
     Ok(())
 }
 // 15 minutes of data | 287 MB on disk | 42 sec || 0.04666666667 time ratio
@@ -292,6 +364,7 @@ fn set_up_logging(logging_level: log::LevelFilter) -> Result<()> {
         .chain(fern::log_file("output.log")?)
         .level(logging_level)
         .level_for("sqlx", log::LevelFilter::Error)
+        .level_for("hyper", log::LevelFilter::Info)
         .chain(std::io::stdout())
         .apply()?;
 

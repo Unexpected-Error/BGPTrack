@@ -1,1 +1,0 @@
-ALTER TABLE Announcement ALTER COLUMN timestamp SET NOT NULL

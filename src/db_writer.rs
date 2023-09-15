@@ -78,15 +78,12 @@ use time::OffsetDateTime;
 
 // errors, logs, tools, etc
 use anyhow::{anyhow, Context, Result};
-use clap::Subcommand;
+
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use log::{debug, info, warn};
-use async_stream::{stream, try_stream};
-use fix_hidden_lifetime_bug::fix_hidden_lifetime_bug;
-use futures::{pin_mut, Stream};
-use futures::stream::StreamExt;
-
+use async_stream::{try_stream};
+use futures::{Stream};
 
 lazy_static! {
     pub(crate) static ref PG_URL: String = {
@@ -123,7 +120,7 @@ pub(crate) async fn open_db() -> Result<sqlx::PgPool, anyhow::Error> {
 /// `
 #[allow(unreachable_code, unused)]
 pub(crate) async fn delete_all(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
-    panic!("GO AWAY, ITS HAPPENED TOO MANY TIMES");
+    //panic!("GO AWAY, ITS HAPPENED TOO MANY TIMES");
 
     {
         warn!("Truncating Announcement Table");
@@ -314,8 +311,5 @@ GROUP BY a1.id,
         info!("Query took: {:.2?}", elapsed);
         Ok(tmp)
 }
-    pub(crate) async fn filter_by_known_ip(&self) -> bool {
-        true
-    }
 }
 

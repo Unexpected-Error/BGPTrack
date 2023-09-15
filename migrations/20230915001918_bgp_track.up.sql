@@ -10,11 +10,11 @@ CREATE TABLE Announcement
     id UUID not null,
     asn bigint not null,
     withdrawal boolean not null,
-    timestamp DOUBLE PRECISION,
+    timestamp DOUBLE PRECISION not null,
     prefix  inet not null,
-    as_path_segments as_path_segment[]
+    as_path_segments as_path_segment[] not null
 );
--- CREATE UNIQUE INDEX ID on Announcement (id);
+-- alter table Announcement add primary key (id);
 -- CREATE INDEX ASN on Announcement (asn);
 -- CREATE INDEX WD on Announcement (withdrawal);
 -- CREATE INDEX TS on Announcement (timestamp);

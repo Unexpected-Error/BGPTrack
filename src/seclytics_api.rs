@@ -1,15 +1,15 @@
+use std::collections::HashSet;
+use std::net::IpAddr;
+use std::str::FromStr;
 // errors, logs, tools, etc
-use anyhow::{anyhow, Context, Result};
-use async_stream::{stream, try_stream};
-use clap::Subcommand;
-use fix_hidden_lifetime_bug::fix_hidden_lifetime_bug;
-use futures::stream::StreamExt;
-use futures::{pin_mut, Stream};
+use anyhow::Result;
 use ipnetwork::IpNetwork;
 use itertools::Itertools;
-use log::{debug, info, warn};
+
+use log::{error, info, trace, warn};
+use reqwest::Client;
 use serde_json::json;
-use url::{ParseOptions, Url};
+use url::Url;
 
 lazy_static::lazy_static! {
     static ref SECLYTICS_API_TOKEN: String = {
@@ -23,40 +23,62 @@ lazy_static::lazy_static! {
         dotenvy::var("SECLYTICS_API_ENDPOINT").expect("SECLYTICS_API_ENDPOINT not found")
     };
 }
-pub(crate) async fn cidr_is_malicious(cidr: IpNetwork) -> Result<bool> {
-    let data: serde_json::Value = reqwest::Client::new()
+pub(crate) async fn asn_is_malicious(
+    asn: i64,
+    cidr: Vec<IpNetwork>,
+    client: &Client,
+) -> Result<usize> {
+    let data: serde_json::Value = client
         .get(url(
-            &*format!(
-                "cidrs/{cidr_base}/{cidr_mask}/ips/",
-                cidr_base = cidr.ip(),
-                cidr_mask = cidr.prefix()
-            ),
-            [],
+            &*("asns/".to_string() + &*asn.to_string()),
+            [
+                // ("ids".to_string(), &*asn.iter().map(|x| x.0.to_string()).join(",")),
+                ("access_token".to_string(), ""),
+            ],
         )?)
         .send()
         .await?
         .json()
         .await?;
-    if data[0]["context"]["categories"] != json!(null) {
-        Ok(true)
-    } else {
-        Ok(false)
+    if data["global_threat_context"]["cidrs"] == json!(null) {
+        warn!("Could not find data!!!");
+        return Ok(0);
     }
+    let known_bad: HashSet<String> = data["global_threat_context"]["cidrs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|x| match x {
+            serde_json::Value::String(x) => Some(x.to_owned()),//Some(IpNetwork::from_str(x).ok().expect(&*format!("couldn't parse, {x}"))),
+            _ => None
+        }
+        )
+        .collect();
+    Ok(cidr
+        .iter()
+        .filter(|prefix| known_bad.contains(&*prefix.to_string()))
+        .count())
 }
 
-fn url<const n: usize>(path: &str, options: [(&str, &str); n]) -> Result<Url> {
-    // let mut api = (*SECLYTICS_API_ENDPOINT).clone();
-    let mut api = Url::options()
-        .base_url(Some(&Url::parse(&**SECLYTICS_API_ENDPOINT)?))
-        .parse(path)?;
+fn url<const N: usize>(path: &str, mut options: [(String, &str); N]) -> Result<String>
+where
+    [(); N + 1]:,
+{
+    // try and remove later with generic_const_expr
 
-    for option in options {
-        api.set_query(Some(&*(option.0.to_string() + "=" + option.1)));
+    // let sol: [(String, &str); N+1] = [options, [("".to_string(),"")]].iter().flat_map(|s| s.iter()).collect();
+    if options[N - 1].0 != "access_token".to_string() {
+        error!("Did not leave room for apikey, abort");
+        panic!()
+    } else {
+        options[N - 1].1 = &**SECLYTICS_API_TOKEN
     }
-    api.set_query(Some(
-        &*("access_token=".to_string() + (*SECLYTICS_API_TOKEN).as_str()),
-    ));
 
-    warn!("URL constructed, {}", api);
+    let api = format!(
+        "{}{path}?{}",
+        *SECLYTICS_API_ENDPOINT,
+        options.map(|(s1, s2)| { s1 + "=" + s2 }).join("&")
+    );
+    trace!("URL constructed, {}", api);
     Ok(api)
 }

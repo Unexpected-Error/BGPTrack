@@ -1,1 +1,0 @@
-ALTER TABLE Announcement ALTER COLUMN as_path_segments SET NOT NULL
