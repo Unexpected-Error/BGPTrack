@@ -1,4 +1,5 @@
-/target
+App/target
 *.log
 *.env
 *.DS_Store
+.idea
