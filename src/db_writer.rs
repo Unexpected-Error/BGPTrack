@@ -101,13 +101,13 @@ pub(crate) async fn open_db() -> Result<sqlx::PgPool, anyhow::Error> {
         .await
         .context("Failed while connecting to pg db")?;
     
-    warn!("Running migrations...");
-    
+    //warn!("Running migrations...");
+/*    
     sqlx::migrate!("./migrations")
         .run(&pool)
         .await
         .context("Failed while migrating")?;
-    
+ */   
     Ok(pool)
 }
 
@@ -120,11 +120,11 @@ pub(crate) async fn open_db() -> Result<sqlx::PgPool, anyhow::Error> {
 /// `
 #[allow(unreachable_code, unused)]
 pub(crate) async fn delete_all(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
-    //panic!("GO AWAY, ITS HAPPENED TOO MANY TIMES");
+    panic!("GO AWAY, ITS HAPPENED TOO MANY TIMES");
 
-    {
-        warn!("Truncating Announcement Table");
-    }
+    
+    warn!("Truncating Announcement Table");
+    
     sqlx::query("TRUNCATE Announcement").execute(pool).await?;
     Ok(())
 }
@@ -246,8 +246,8 @@ SELECT
       a1.prefix                       AS prefix,
       to_timestamp(MIN(a2.timestamp)) AS "wd_time!",
       to_timestamp(a1.timestamp)      AS "ann_time!"
-FROM Announcement AS a1
-        JOIN Announcement AS a2 ON a1.prefix = a2.prefix
+FROM Announcement_new AS a1
+        JOIN Announcement_new AS a2 ON a1.prefix = a2.prefix
    AND a1.asn = a2.asn
    AND a2.withdrawal = true
    AND ABS(a1.timestamp - a2.timestamp) < $1
@@ -281,8 +281,8 @@ SELECT
       a1.prefix                       AS prefix,
       to_timestamp(MIN(a2.timestamp)) AS "wd_time!",
       to_timestamp(a1.timestamp)      AS "ann_time!"
-FROM Announcement AS a1
-        JOIN Announcement AS a2 ON a1.prefix = a2.prefix
+FROM Announcement_new AS a1
+        JOIN Announcement_new AS a2 ON a1.prefix = a2.prefix
    AND a1.asn = a2.asn
    AND a2.withdrawal = true
    AND ABS(a1.timestamp - a2.timestamp) < $1
@@ -311,5 +311,40 @@ GROUP BY a1.id,
         info!("Query took: {:.2?}", elapsed);
         Ok(tmp)
 }
+    // async fn rows_in_window(start: UnixTimeStamp, stop: UnixTimeStamp, pool: &sqlx::PgPool) -> Result<Vec<Self>> {
+    //     sqlx::query!(
+    //     r#"
+    //     SELECT
+    //     asn                          AS asn,
+    //      prefix                       AS prefix,
+    //   to_timestamp(MIN(timestamp)) AS "wd_time!",
+    //   to_timestamp(a1.timestamp)      AS "ann_time!"
+    //     FROM Announcement_new 
+    //     WHERE timestamp >= $1
+    //     AND timestamp < $2
+    //     "#,
+    //     f64::from(stop),            // end of ann window
+    //     f64::from(start),
+    // )
+    //         .fetch_one(pool)
+    //         .await?
+    //         .number
+    //         .ok_or(anyhow!("Did not get size of window number"))
+    // }
 }
-
+pub(crate) async fn number_of_rows_in_window(start: UnixTimeStamp, stop: UnixTimeStamp, pool: &sqlx::PgPool) -> Result<i64> {
+    sqlx::query!(
+        r#"
+        SELECT COUNT(*) AS NUMBER
+        FROM Announcement_new 
+        WHERE timestamp >= $1
+        AND timestamp < $2
+        "#,
+        f64::from(stop),            // end of ann window
+        f64::from(start),
+    )
+        .fetch_one(pool)
+        .await?
+        .number
+        .ok_or(anyhow!("Did not get size of window number"))
+}

@@ -35,6 +35,7 @@ fix-hidden-lifetime-bug = "0.2.5"
 reqwest = { version = "0.11.20", features = ["json"] }
 serde_json = "1.0.106"
 url = "2.4.1"
+fxhash = "0.2.1"
 #slint = "1.2.0"
 
 [package.metadata.cargo-udeps.ignore]

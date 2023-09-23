@@ -2,11 +2,12 @@ use std::collections::HashSet;
 use std::net::IpAddr;
 use std::str::FromStr;
 // errors, logs, tools, etc
-use anyhow::Result;
+use anyhow::{anyhow, Result};
+use fxhash::FxHashSet;
 use ipnetwork::IpNetwork;
 use itertools::Itertools;
 
-use log::{error, info, trace, warn};
+use log::{debug, error, info, trace, warn};
 use reqwest::Client;
 use serde_json::json;
 use url::Url;
@@ -27,7 +28,49 @@ pub(crate) async fn asn_is_malicious(
     asn: i64,
     cidr: Vec<IpNetwork>,
     client: &Client,
-) -> Result<usize> {
+) -> Result<(usize, bool)> {
+    let data: serde_json::Value = client
+        .get(url(
+            &*("asns/".to_string() + &*asn.to_string()),
+            [
+                // ("ids".to_string(), &*asn.iter().map(|x| x.0.to_string()).join(",")),
+                ("access_token".to_string(), ""),
+            ],
+        )?)
+        .send()
+        .await?
+        .json()
+        .await?;
+    
+    let mal_asn = if let Some(categories) = data["global_threat_context"]["categories"].as_array() {
+        categories.contains(&json!("malicious"))
+    } else {false};
+    if data["global_threat_context"]["cidrs"] == json!(null) {
+        warn!("Could not find data for AS{asn}");
+        return Ok((0, mal_asn));
+    }
+    let known_bad: HashSet<IpNetwork> = data["global_threat_context"]["cidrs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|x| match x {
+            serde_json::Value::String(x) => Some(IpNetwork::from_str(x).ok().expect(&*format!("couldn't parse, {x}"))),
+            _ => None
+        }
+        )
+        .collect();
+    debug!("{} known bad cidrs for AS{asn}", known_bad.len());
+    
+    Ok((cidr
+        .iter()
+        .filter(|prefix| known_bad.contains(prefix))
+        .count(), mal_asn))
+}
+pub(crate) async fn get_reported_cidrs(
+    asn: i64,
+    client: &Client,
+) -> Result<FxHashSet<IpNetwork>> {
+    info!("webreq");
     let data: serde_json::Value = client
         .get(url(
             &*("asns/".to_string() + &*asn.to_string()),
@@ -41,23 +84,19 @@ pub(crate) async fn asn_is_malicious(
         .json()
         .await?;
     if data["global_threat_context"]["cidrs"] == json!(null) {
-        warn!("Could not find data!!!");
-        return Ok(0);
+        trace!("Could not find data!!!");
+        return Err(anyhow!("Could not find data"));
     }
-    let known_bad: HashSet<String> = data["global_threat_context"]["cidrs"]
+    Ok(data["global_threat_context"]["cidrs"]
         .as_array()
         .unwrap()
         .iter()
         .filter_map(|x| match x {
-            serde_json::Value::String(x) => Some(x.to_owned()),//Some(IpNetwork::from_str(x).ok().expect(&*format!("couldn't parse, {x}"))),
+            serde_json::Value::String(x) => Some(IpNetwork::from_str(x).ok().expect(&*format!("couldn't parse, {x}"))),
             _ => None
         }
         )
-        .collect();
-    Ok(cidr
-        .iter()
-        .filter(|prefix| known_bad.contains(&*prefix.to_string()))
-        .count())
+        .collect())
 }
 
 fn url<const N: usize>(path: &str, mut options: [(String, &str); N]) -> Result<String>
