@@ -1,16 +1,16 @@
 use std::collections::HashSet;
-use std::net::IpAddr;
+
 use std::str::FromStr;
 // errors, logs, tools, etc
-use anyhow::{anyhow, Result};
-use fxhash::FxHashSet;
+use anyhow::{Result};
+
 use ipnetwork::IpNetwork;
 use itertools::Itertools;
 
-use log::{debug, error, info, trace, warn};
+use log::{debug, error, trace, warn};
 use reqwest::Client;
 use serde_json::json;
-use url::Url;
+
 
 lazy_static::lazy_static! {
     static ref SECLYTICS_API_TOKEN: String = {

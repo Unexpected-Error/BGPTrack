@@ -3,7 +3,7 @@
 #![feature(let_chains)]
 
 // Logs and Errors
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use async_stream::stream;
 
 use fern::colors::{Color, ColoredLevelConfig};
@@ -18,13 +18,13 @@ use bgp::{collect_bgp, parse_bgp};
 // db
 mod db_writer;
 use db_writer::{find_short_lived, open_db, types::DELIMITER};
-use sqlx::{Connection, PgPool};
+use sqlx::{PgPool};
 
 // bag of tools
 use crate::db_writer::{ip_search, PotentialHijack};
 use clap::{Parser, Subcommand};
 use crossbeam_channel::bounded;
-use futures::{future, pin_mut, StreamExt, TryStreamExt};
+use futures::{pin_mut, StreamExt};
 use itertools::{Itertools, MinMaxResult};
 
 // Seclytics API
