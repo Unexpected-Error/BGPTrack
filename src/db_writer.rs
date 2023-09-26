@@ -2,13 +2,13 @@ pub(crate) mod types {
     // Import Special Types
     use ipnetwork::IpNetwork;
     pub(crate) type UnixTimeStamp = i32;
-    
+
     // sqlx stuff
     use serde::{Deserialize, Serialize};
     use sqlx::postgres::{PgHasArrayType, PgTypeInfo};
     pub(crate) static DELIMITER: &str = ","; // helps keep delimiter constant between copy command and display impl
     use std::{fmt, ops}; // a bunch of hacky stuff
-    
+
     #[allow(dead_code)]
     #[derive(sqlx::FromRow, Debug, Clone, PartialEq, PartialOrd)]
     pub(crate) struct Announcement {
@@ -71,43 +71,42 @@ pub(crate) mod types {
 }
 
 // types
-use std::net::IpAddr;
-use ipnetwork::IpNetwork;
 use crate::db_writer::types::{ASPathSeg, Announcement, UnixTimeStamp};
+use ipnetwork::IpNetwork;
+use std::net::IpAddr;
 use time::OffsetDateTime;
 
 // errors, logs, tools, etc
 use anyhow::{anyhow, Context, Result};
 
+use async_stream::try_stream;
+use futures::Stream;
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use log::{debug, info, warn};
-use async_stream::{try_stream};
-use futures::{Stream};
 
 lazy_static! {
     pub(crate) static ref PG_URL: String = {
-        use dotenvy::{dotenv};
+        use dotenvy::dotenv;
         dotenv().expect(".env file not found");
         dotenvy::var("DATABASE_URL").expect("DATABASE_URL not found")
     };
 }
 
 pub(crate) async fn open_db() -> Result<sqlx::PgPool, anyhow::Error> {
-
     debug!("Spinning up db conn...");
-    
+
     let pool = sqlx::postgres::PgPool::connect(&**PG_URL)
         .await
         .context("Failed while connecting to pg db")?;
-    
+
     //warn!("Running migrations...");
-/*    
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .context("Failed while migrating")?;
- */   
+    /*
+       sqlx::migrate!("./migrations")
+           .run(&pool)
+           .await
+           .context("Failed while migrating")?;
+    */
     Ok(pool)
 }
 
@@ -122,9 +121,8 @@ pub(crate) async fn open_db() -> Result<sqlx::PgPool, anyhow::Error> {
 pub(crate) async fn delete_all(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
     panic!("GO AWAY, ITS HAPPENED TOO MANY TIMES");
 
-    
     warn!("Truncating Announcement Table");
-    
+
     sqlx::query("TRUNCATE Announcement").execute(pool).await?;
     Ok(())
 }
@@ -147,51 +145,8 @@ pub(crate) async fn ip_search(
         .await?;
     Ok(res)
 }
-/*
-/// Enum with impl'd fn for all ways of processing a iter of [`Announcement`]
-///
-/// &self.process() handles picking the fn for the given enum
-#[derive(Subcommand)]
-pub(crate) enum Processor {
-    /// If the same asn announced and withdrew the same prefix multiple times,
-    /// get the overall time range that asn was active with the prefix
-    OverallTimeRange,
-    Raw
-}
-impl Processor {
-    /// Picks correct fn for the given variant of [`Processor`]
-    pub(crate) fn process<S: Stream<Item = Vec<ShortLivedRec>>>(input: S)
-    -> impl Stream<Item = u32> {
-        match self {
-            Processor::OverallTimeRange => Self::overall_time_range(thing),
-            Processor::Raw => Self::collect(thing)
-        }
-    }
-    fn collect(
-        thing: impl Iterator<Item = (IpNetwork, OffsetDateTime, OffsetDateTime, i64)>,
-    ) -> Vec<(IpNetwork, OffsetDateTime, OffsetDateTime, i64)> {
-        thing
-            .collect::<Vec<(IpNetwork, OffsetDateTime, OffsetDateTime, i64)>>()
-    }
-    // Same prefix and asn, but different ann pointing to the same withdraw? Merge all ann/withdraws from a asn about a prefix
-    fn overall_time_range(
-        thing: impl Iterator<Item = (IpNetwork, OffsetDateTime, OffsetDateTime, i64)>,
-    ) -> Vec<(IpNetwork, OffsetDateTime, OffsetDateTime, i64)> {
-        thing
-            .sorted_by_key(|&data| data.0)
-            .coalesce(|x, y| {
-                if x.0 == y.0 && x.3 == y.3 && !(x.1 == y.1 && x.2 == y.2) {
-                    debug!("COLLAPSED\n{:?} and\n{:?}", x, y);
-                    Ok((y.0, y.1.min(x.1), y.2.max(x.2), y.3))
-                } else {
-                    Err((x, y))
-                }
-            })
-            .collect::<Vec<(IpNetwork, OffsetDateTime, OffsetDateTime, i64)>>()
-    }
-}*/
 
-/// Collects all short lived announcements and runs a [`Processor`] on them, returning the results 
+/// Collects all short lived announcements and runs a [`Processor`] on them, returning the results
 /// MAKE SURE TO PIN FOR USE
 /// pin_mut!(n);
 pub(crate) async fn find_short_lived(
@@ -202,21 +157,22 @@ pub(crate) async fn find_short_lived(
     yield_window: i32,
     // processor: Processor,
     pool: &sqlx::PgPool,
-) -> impl Stream< Item = Result<PotentialHijack/*(IpNetwork, OffsetDateTime, OffsetDateTime, i64)*/> > + '_ {
+) -> impl Stream<Item = Result<PotentialHijack /*(IpNetwork, OffsetDateTime, OffsetDateTime, i64)*/>> + '_
+{
     try_stream! {
         debug!("Start: {start}, Stop: {stop}, chunk size: {}", yield_window as usize);
         for mut i in &((start+1)..stop).chunks(yield_window as usize) {
             // debug!("Chunk: {i:?}");
             let sub_start = i.next();
             let mut sub_stop = i.last();
-            
+
             debug!("Short lived sub-query window is now between {:?} and {:?}", sub_start, sub_stop );
-            
+
             // rare edge case where the last chunk is exactly 1 sec and thus the iter only has one value to yield
-            if sub_start.is_some() && sub_stop.is_none() { 
+            if sub_start.is_some() && sub_stop.is_none() {
                 sub_stop = sub_start
             }
-            
+
             for potential in PotentialHijack::query_short_lived_window(window, (sub_start.ok_or(anyhow!("No start time"))?-1), sub_stop.ok_or(anyhow!(""))?, limit, pool).await? {
                 yield potential;
             }
@@ -229,18 +185,24 @@ pub(crate) struct PotentialHijack {
     pub(crate) prefix: IpNetwork,
     pub(crate) ann_time: OffsetDateTime,
     pub(crate) wd_time: OffsetDateTime,
-    pub(crate) asn: i64
+    pub(crate) asn: i64,
 }
 
 impl PotentialHijack {
-    async fn query_short_lived_window(window: UnixTimeStamp, start: UnixTimeStamp, stop: UnixTimeStamp, limit: Option<i64>, pool: &sqlx::PgPool) -> Result<Vec<Self>> {
+    async fn query_short_lived_window(
+        window: UnixTimeStamp,
+        start: UnixTimeStamp,
+        stop: UnixTimeStamp,
+        limit: Option<i64>,
+        pool: &sqlx::PgPool,
+    ) -> Result<Vec<Self>> {
         debug!("Running sub-window of short lived query");
-    use std::time::Instant;
-    let now = Instant::now();
-    let tmp = 
-        if let Some(n) = limit {
-        sqlx::query_as!(PotentialHijack, 
-            r#"
+        use std::time::Instant;
+        let now = Instant::now();
+        let tmp = if let Some(n) = limit {
+            sqlx::query_as!(
+                PotentialHijack,
+                r#"
 SELECT
       a1.asn                          AS asn,
       a1.prefix                       AS prefix,
@@ -264,18 +226,19 @@ GROUP BY a1.id,
         a1.timestamp
 LIMIT $6
 "#,
-            f64::from(window),
-            f64::from(stop + window), // beyond the window, no valid withdraws are present
-            f64::from(stop),            // end of ann window
-            f64::from(start),           // start of ann window, withdraws may be immediate
-            f64::from(start),
-            (n)
-        )
+                f64::from(window),
+                f64::from(stop + window), // beyond the window, no valid withdraws are present
+                f64::from(stop),          // end of ann window
+                f64::from(start),         // start of ann window, withdraws may be immediate
+                f64::from(start),
+                (n)
+            )
             .fetch_all(pool)
             .await?
-    } else {
-        sqlx::query_as!(PotentialHijack, 
-            r#"
+        } else {
+            sqlx::query_as!(
+                PotentialHijack,
+                r#"
 SELECT
       a1.asn                          AS asn,
       a1.prefix                       AS prefix,
@@ -298,53 +261,17 @@ GROUP BY a1.id,
         a1.as_path_segments,
         a1.timestamp
 "#,
-            f64::from(window),
-            f64::from(stop + window), // beyond the window, no valid withdraws are present
-            f64::from(stop),            // end of ann window
-            f64::from(start),           // start of ann window, withdraws may be immediate
-            f64::from(start),
-        )
+                f64::from(window),
+                f64::from(stop + window), // beyond the window, no valid withdraws are present
+                f64::from(stop),          // end of ann window
+                f64::from(start),         // start of ann window, withdraws may be immediate
+                f64::from(start),
+            )
             .fetch_all(pool)
             .await?
-    };
+        };
         let elapsed = now.elapsed();
         info!("Query took: {:.2?}", elapsed);
         Ok(tmp)
-}
-    // async fn rows_in_window(start: UnixTimeStamp, stop: UnixTimeStamp, pool: &sqlx::PgPool) -> Result<Vec<Self>> {
-    //     sqlx::query!(
-    //     r#"
-    //     SELECT
-    //     asn                          AS asn,
-    //      prefix                       AS prefix,
-    //   to_timestamp(MIN(timestamp)) AS "wd_time!",
-    //   to_timestamp(a1.timestamp)      AS "ann_time!"
-    //     FROM Announcement_new 
-    //     WHERE timestamp >= $1
-    //     AND timestamp < $2
-    //     "#,
-    //     f64::from(stop),            // end of ann window
-    //     f64::from(start),
-    // )
-    //         .fetch_one(pool)
-    //         .await?
-    //         .number
-    //         .ok_or(anyhow!("Did not get size of window number"))
-    // }
-}
-pub(crate) async fn number_of_rows_in_window(start: UnixTimeStamp, stop: UnixTimeStamp, pool: &sqlx::PgPool) -> Result<i64> {
-    sqlx::query!(
-        r#"
-        SELECT COUNT(*) AS NUMBER
-        FROM Announcement_new 
-        WHERE timestamp >= $1
-        AND timestamp < $2
-        "#,
-        f64::from(stop),            // end of ann window
-        f64::from(start),
-    )
-        .fetch_one(pool)
-        .await?
-        .number
-        .ok_or(anyhow!("Did not get size of window number"))
+    }
 }

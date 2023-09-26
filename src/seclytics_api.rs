@@ -41,10 +41,12 @@ pub(crate) async fn asn_is_malicious(
         .await?
         .json()
         .await?;
-    
+
     let mal_asn = if let Some(categories) = data["global_threat_context"]["categories"].as_array() {
         categories.contains(&json!("malicious"))
-    } else {false};
+    } else {
+        false
+    };
     if data["global_threat_context"]["cidrs"] == json!(null) {
         warn!("Could not find data for AS{asn}");
         return Ok((0, mal_asn));
@@ -54,49 +56,22 @@ pub(crate) async fn asn_is_malicious(
         .unwrap()
         .iter()
         .filter_map(|x| match x {
-            serde_json::Value::String(x) => Some(IpNetwork::from_str(x).ok().expect(&*format!("couldn't parse, {x}"))),
-            _ => None
-        }
-        )
+            serde_json::Value::String(x) => Some(
+                IpNetwork::from_str(x)
+                    .ok()
+                    .expect(&*format!("couldn't parse, {x}")),
+            ),
+            _ => None,
+        })
         .collect();
     debug!("{} known bad cidrs for AS{asn}", known_bad.len());
-    
-    Ok((cidr
-        .iter()
-        .filter(|prefix| known_bad.contains(prefix))
-        .count(), mal_asn))
-}
-pub(crate) async fn get_reported_cidrs(
-    asn: i64,
-    client: &Client,
-) -> Result<FxHashSet<IpNetwork>> {
-    info!("webreq");
-    let data: serde_json::Value = client
-        .get(url(
-            &*("asns/".to_string() + &*asn.to_string()),
-            [
-                // ("ids".to_string(), &*asn.iter().map(|x| x.0.to_string()).join(",")),
-                ("access_token".to_string(), ""),
-            ],
-        )?)
-        .send()
-        .await?
-        .json()
-        .await?;
-    if data["global_threat_context"]["cidrs"] == json!(null) {
-        trace!("Could not find data!!!");
-        return Err(anyhow!("Could not find data"));
-    }
-    Ok(data["global_threat_context"]["cidrs"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|x| match x {
-            serde_json::Value::String(x) => Some(IpNetwork::from_str(x).ok().expect(&*format!("couldn't parse, {x}"))),
-            _ => None
-        }
-        )
-        .collect())
+
+    Ok((
+        cidr.iter()
+            .filter(|prefix| known_bad.contains(prefix))
+            .count(),
+        mal_asn,
+    ))
 }
 
 fn url<const N: usize>(path: &str, mut options: [(String, &str); N]) -> Result<String>

@@ -1,5 +1,5 @@
 // Logs and Errors
-use log::{info, error};
+use log::{error, info};
 
 // BGP data
 use uuid::Uuid;
@@ -12,7 +12,7 @@ use bgpkit_parser::{
 };
 
 // Data Processing
-use crossbeam_channel::{Sender};
+use crossbeam_channel::Sender;
 use rayon::prelude::*;
 const CHUNK_SIZE: usize = 12;
 pub const EOF: [u8; 5] = [0, 0, 0, 0, 0];
